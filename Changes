@@ -1,0 +1,17 @@
+Revision history for gott
+
+0.2.0  2026-02-15
+  - Renamed binary: gottool -> gott
+  - Added git interop commands: git-remote, git-pull, git-push, sync
+  - Added patch export (gott patch) and patch apply (gott apply)
+  - Added branch-based stash: gott stash / gott unstash
+  - Added gott nb (new branch + switch in one step)
+  - Colour output via ANSI codes (disabled when not a TTY)
+  - repo_path() helper walks up from cwd to find .got/repository
+  - gott-remote and gott-stash files stored inside bare repo
+
+0.1.0  2026-02-15
+  - Initial release
+  - Commands: new, clone, snap, log, branches, switch, undo, info, help
+  - CPAN packaging via Makefile.PL
+  - GitHub Actions CI (multi-perl matrix, Perl::Critic lint, syntax check)
