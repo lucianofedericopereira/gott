@@ -3,9 +3,11 @@
   <img src="assets/gott.png" alt="gott logo">
 </p>
 
-# gott - Game of Trees Tool
+# gott — A Third-Party CLI for Game of Trees
 
-got's sidekick. A Perl companion for [Game of Trees](https://gameoftrees.org) that handles the sequences you reach for every day, so got can focus on being got.
+`gott` is a third-party command-line interface for the [Game of Trees](https://gameoftrees.org) version control system, designed to streamline common workflows. It operates as a standalone Perl-based wrapper, providing convenient shortcuts for daily tasks.
+
+**Disclaimer:** `gott` is an independent, community-driven project. It is not affiliated with, endorsed by, or maintained by the official Game of Trees or OpenBSD development teams.
 
 ---
 
