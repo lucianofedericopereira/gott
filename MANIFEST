@@ -1,0 +1,14 @@
+assets/gott.png
+builds/got_0.121-portable-1_amd64.deb
+Changes
+CODE_OF_CONDUCT.md
+gott
+install.sh
+LICENSE
+Makefile.PL
+MANIFEST
+README.md
+t/00-syntax.t
+t/01-help.t
+t/02-errors.t
+t/03-gitinterop.t

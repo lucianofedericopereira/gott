@@ -1,0 +1,32 @@
+---
+abstract: 'Game of Trees companion CLI with git interop'
+author:
+  - 'Luciano Federico Pereira <lucianopereira@posteo.es>'
+build_requires:
+  ExtUtils::MakeMaker: '0'
+  Test::More: '0.94'
+  Test::Output: '0'
+configure_requires:
+  ExtUtils::MakeMaker: '0'
+dynamic_config: 0
+generated_by: 'ExtUtils::MakeMaker version 7.70, CPAN::Meta::Converter version 2.150010'
+license: bsd
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: '1.4'
+name: gott
+no_index:
+  directory:
+    - t
+    - inc
+requires:
+  Cwd: '0'
+  File::Basename: '0'
+  File::Path: '2.08'
+  POSIX: '0'
+  perl: '5.010'
+resources:
+  bugtracker: https://github.com/lucianofedericopereira/gott/issues
+  repository: https://github.com/lucianofedericopereira/gott.git
+version: v0.2.0
+x_serialization_backend: 'CPAN::Meta::YAML version 0.018'
