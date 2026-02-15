@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="assets/gott.png" alt="gott logo" width="200">
+  <img src="assets/gott.png" alt="gott logo">
 </p>
 
 # gott - Game of Trees Tool
