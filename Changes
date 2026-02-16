@@ -1,5 +1,17 @@
 Revision history for gott
 
+0.4.0  2026-02-16
+  - Restructured command definitions into @COMMANDS array of hashrefs:
+    adding a command now requires editing one line + writing one sub,
+    with help output and dispatch generated automatically
+  - Extracted shared helpers: _read_file, _write_file, _do_rebase
+  - Added $DEFAULT_REPO_DIR configuration variable at top of script
+  - Fixed all tests to work without got installed (PATH stub)
+  - Fixed t/03-gitinterop.t: abs_path now properly imported from Cwd
+  - Removed Test::Output dependency (unused)
+  - Makefile.PL: NAME corrected to App::gott for CPAN, MYMETA.* added to clean
+  - README: added Contributing section for non-Perl developers
+
 0.3.0  2026-02-16
   - Added 'gott rebase [base]': rebase current branch onto a given base
     (defaults to refs/remotes/origin/main), matching the Git UX where the

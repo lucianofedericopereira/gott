@@ -12,7 +12,12 @@ use File::Path    qw(make_path);
 use POSIX         qw(strftime);
 use Cwd           qw(getcwd);
 
-our $VERSION = '0.3.0';
+our $VERSION = '0.4.0';
+
+# ── configuration ───────────────────────────────────────────────────────────
+# Change DEFAULT_REPO_DIR to use a different base directory for new repos.
+
+our $DEFAULT_REPO_DIR = $ENV{HOME} . '/Repos';
 
 # ── colour helpers ─────────────────────────────────────────────────────────
 
@@ -88,37 +93,49 @@ sub current_branch {
 
 sub timestamp { strftime( '%Y%m%d-%H%M%S', localtime ) }
 
-# ── commands ───────────────────────────────────────────────────────────────
+# ── command definitions ────────────────────────────────────────────────────
+# To add a command: add an entry here, then write a cmd_foo sub below.
+# Fields: name, group, usage (args), desc (one line), code (sub ref)
+# Groups: 'local' or 'git'
+
+my @COMMANDS = (
+    # name          group   usage                  description
+    { name => 'new',        group => 'local', usage => '<name> [dir]',   desc => 'Init bare repo + work tree, ready to use',          code => \&cmd_new        },
+    { name => 'clone',      group => 'local', usage => '<url> [dir]',    desc => 'Clone a remote got/git repo and check out',         code => \&cmd_clone      },
+    { name => 'snap',       group => 'local', usage => '[msg]',           desc => 'Stage all (got add -R .) then commit',              code => \&cmd_snap       },
+    { name => 'log',        group => 'local', usage => '',                desc => 'Pretty colour log',                                 code => \&cmd_log        },
+    { name => 'branches',   group => 'local', usage => '',                desc => 'List branches, highlight current',                  code => \&cmd_branches   },
+    { name => 'switch',     group => 'local', usage => '<branch>',        desc => 'Switch to branch',                                  code => \&cmd_switch     },
+    { name => 'nb',         group => 'local', usage => '<branch>',        desc => 'New branch and switch to it',                      code => \&cmd_nb         },
+    { name => 'undo',       group => 'local', usage => '[file]',          desc => 'Revert file (or all) to last commit',               code => \&cmd_undo       },
+    { name => 'info',       group => 'local', usage => '',                desc => 'Work tree info + status',                           code => \&cmd_info       },
+    { name => 'git-remote', group => 'git',   usage => '[url]',           desc => 'Show or set the upstream git remote URL',           code => \&cmd_git_remote },
+    { name => 'git-pull',   group => 'git',   usage => '',                desc => 'Fetch from git remote into local got repo',         code => \&cmd_git_pull   },
+    { name => 'git-push',   group => 'git',   usage => '[branch]',        desc => 'Push got commits upstream to git remote',           code => \&cmd_git_push   },
+    { name => 'sync',       group => 'git',   usage => '',                desc => 'git-pull then rebase current branch on top',        code => \&cmd_sync       },
+    { name => 'rebase',     group => 'git',   usage => '[base]',          desc => 'Rebase current branch onto base (default: origin/main)', code => \&cmd_rebase },
+    { name => 'patch',      group => 'git',   usage => '[n]',             desc => 'Export last n commits as patch files (default 1)', code => \&cmd_patch      },
+    { name => 'apply',      group => 'git',   usage => '<file.patch>',    desc => 'Apply a patch file to the work tree',               code => \&cmd_apply      },
+    { name => 'stash',      group => 'git',   usage => '',                desc => 'Save uncommitted changes to a temp branch',         code => \&cmd_stash      },
+    { name => 'unstash',    group => 'git',   usage => '',                desc => 'Restore most recent stash',                         code => \&cmd_unstash    },
+);
+
+# ── help (auto-generated from @COMMANDS) ───────────────────────────────────
 
 sub cmd_help {
     print bold("gott $VERSION") . " — Game of Trees companion\n\n";
     print "Usage: gott <command> [args]\n\n";
-    print bold("Local workflow\n");
-    print <<'HELP';
-  new      <name> [dir]   Init bare repo + work tree, ready to use
-  clone    <url>  [dir]   Clone a remote got/git repo and check out
-  snap     [msg]          Stage all (got add -R .) then commit
-  log                     Pretty colour log
-  branches                List branches, highlight current
-  switch   <branch>       Switch to branch
-  nb       <branch>       New branch and switch to it
-  undo     [file]         Revert file (or all) to last commit
-  info                    Work tree info + status
 
-HELP
-    print bold("Git interoperability\n");
-    print <<'HELP';
-  git-remote [url]        Show or set the upstream git remote URL
-  git-pull                Fetch from git remote into local got repo
-  git-push   [branch]     Push got commits upstream to git remote
-  sync                    git-pull then rebase current branch on top
-  rebase     [base]       Rebase current branch onto base (default: origin/main)
-  patch      [n]          Export last n commits as patch files (default 1)
-  apply      <file.patch> Apply a patch file to the work tree
-  stash                   Save uncommitted changes to a temp branch
-  unstash                 Restore most recent stash
+    my %groups = ( local => 'Local workflow', git => 'Git interoperability' );
+    for my $group ( 'local', 'git' ) {
+        print bold( $groups{$group} ) . "\n";
+        for my $c ( grep { $_->{group} eq $group } @COMMANDS ) {
+            my $left = sprintf( '  %-10s %-18s', $c->{name}, $c->{usage} );
+            print "$left $c->{desc}\n";
+        }
+        print "\n";
+    }
 
-HELP
     print bold("Environment\n");
     print "  GOT_AUTHOR   \"Name <email>\"  (required for new/snap/stash)\n\n";
 }
@@ -130,7 +147,7 @@ sub cmd_new {
     die "Usage: gott new <name> [dir]\n" unless $name;
     author_required();
 
-    $base_dir //= $ENV{HOME} . '/Repos';
+    $base_dir //= $DEFAULT_REPO_DIR;
     make_path($base_dir) unless -d $base_dir;
 
     my $repo = "$base_dir/$name.git";
@@ -248,13 +265,36 @@ sub cmd_info {
 
 sub _remote_file { repo_path() . '/gott-remote' }
 
+sub _write_file {
+    my ( $path, $content ) = @_;
+    open( my $fh, '>', $path ) or die "Cannot write $path: $!\n";
+    print $fh "$content\n";
+    close $fh;
+}
+
+sub _read_file {
+    my ($path) = @_;
+    open( my $fh, '<', $path ) or die "Cannot read $path: $!\n";
+    my $line = <$fh>;
+    chomp $line;
+    return $line;
+}
+
 sub _read_remote {
     my $file = _remote_file();
     die "No git remote set. Run: gott git-remote <url>\n" unless -f $file;
-    open( my $fh, '<', $file ) or die "Cannot read $file: $!\n";
-    my $url = <$fh>;
-    chomp $url;
-    return $url;
+    return _read_file($file);
+}
+
+sub _do_rebase {
+    my ($base) = @_;
+    my $rc = system( 'got', 'rebase', $base );
+    if ( $rc != 0 ) {
+        print red("Rebase has conflicts.") . " Resolve, then:\n";
+        print "  got rebase -c   # continue\n";
+        print "  got rebase -a   # abort\n";
+        exit 1;
+    }
 }
 
 sub cmd_git_remote {
@@ -262,16 +302,11 @@ sub cmd_git_remote {
     worktree_or_die();
     my $file = _remote_file();
     if ($url) {
-        open( my $fh, '>', $file ) or die "Cannot write $file: $!\n";
-        print $fh "$url\n";
-        close $fh;
+        _write_file( $file, $url );
         print "Remote set to: " . cyan($url) . "\n";
     } else {
         if ( -f $file ) {
-            open( my $fh, '<', $file ) or die $!;
-            my $u = <$fh>;
-            chomp $u;
-            print "Remote: " . cyan($u) . "\n";
+            print "Remote: " . cyan( _read_file($file) ) . "\n";
         } else {
             print "No remote set. Use: gott git-remote <url>\n";
         }
@@ -311,13 +346,7 @@ sub cmd_sync {
     run( 'got', 'fetch', '-r', $url, '-R', $repo );
 
     print "Rebasing " . cyan($branch) . " on origin/main ...\n";
-    my $rc = system( 'got', 'rebase', 'refs/remotes/origin/main' );
-    if ( $rc != 0 ) {
-        print red("Rebase has conflicts.") . " Resolve, then:\n";
-        print "  got rebase -c   # continue\n";
-        print "  got rebase -a   # abort\n";
-        exit 1;
-    }
+    _do_rebase('refs/remotes/origin/main');
     print green("Sync complete.") . "\n";
 }
 
@@ -327,13 +356,7 @@ sub cmd_rebase {
     $new_base //= 'refs/remotes/origin/main';
     my $branch = current_branch();
     print "Rebasing " . cyan($branch) . " onto " . cyan($new_base) . " ...\n";
-    my $rc = system( 'got', 'rebase', $new_base );
-    if ( $rc != 0 ) {
-        print red("Rebase has conflicts.") . " Resolve, then:\n";
-        print "  got rebase -c   # continue\n";
-        print "  got rebase -a   # abort\n";
-        exit 1;
-    }
+    _do_rebase($new_base);
     print green("Rebase complete.") . "\n";
 }
 
@@ -393,10 +416,7 @@ sub cmd_stash {
     run( 'got', 'update', '-b', $branch );
     run( 'got', 'revert', '.' );
 
-    my $sf = repo_path() . '/gott-stash';
-    open( my $fh, '>', $sf ) or die "Cannot write $sf: $!\n";
-    print $fh "$stash\n";
-    close $fh;
+    _write_file( repo_path() . '/gott-stash', $stash );
 
     print green("Stashed.") . " Restore with: gott unstash\n";
 }
@@ -406,10 +426,7 @@ sub cmd_unstash {
     my $sf = repo_path() . '/gott-stash';
     die "No stash found. Run 'gott stash' first.\n" unless -f $sf;
 
-    open( my $fh, '<', $sf ) or die "Cannot read $sf: $!\n";
-    my $stash = <$fh>;
-    chomp $stash;
-    close $fh;
+    my $stash = _read_file($sf);
 
     print "Restoring stash from branch " . cyan($stash) . " ...\n";
 
@@ -438,27 +455,10 @@ got_required();
 my $cmd = shift @ARGV // 'help';
 
 my %dispatch = (
-    new          => \&cmd_new,
-    clone        => \&cmd_clone,
-    snap         => \&cmd_snap,
-    log          => \&cmd_log,
-    branches     => \&cmd_branches,
-    switch       => \&cmd_switch,
-    nb           => \&cmd_nb,
-    undo         => \&cmd_undo,
-    info         => \&cmd_info,
-    'git-remote' => \&cmd_git_remote,
-    'git-pull'   => \&cmd_git_pull,
-    'git-push'   => \&cmd_git_push,
-    sync         => \&cmd_sync,
-    rebase       => \&cmd_rebase,
-    patch        => \&cmd_patch,
-    apply        => \&cmd_apply,
-    stash        => \&cmd_stash,
-    unstash      => \&cmd_unstash,
-    help         => \&cmd_help,
-    '--help'     => \&cmd_help,
-    '-h'         => \&cmd_help,
+    ( map { $_->{name} => $_->{code} } @COMMANDS ),
+    help     => \&cmd_help,
+    '--help' => \&cmd_help,
+    '-h'     => \&cmd_help,
 );
 
 my $handler = $dispatch{$cmd}
