@@ -1,5 +1,12 @@
 Revision history for gott
 
+0.3.0  2026-02-16
+  - Added 'gott rebase [base]': rebase current branch onto a given base
+    (defaults to refs/remotes/origin/main), matching the Git UX where the
+    argument is the new base rather than the branch being rebased. Users
+    switching between Git and Got no longer need to manually update their
+    work tree before rebasing. Thanks to Stefan for the suggestion.
+
 0.2.0  2026-02-15
   - Renamed binary: gottool -> gott
   - Added git interop commands: git-remote, git-pull, git-push, sync

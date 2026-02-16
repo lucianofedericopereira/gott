@@ -34,5 +34,5 @@ WriteMakefile(
         },
     },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz' },
-    clean => { FILES    => 'gott-*' },
+    clean => { FILES    => 'gott-* pm_to_blib' },
 );

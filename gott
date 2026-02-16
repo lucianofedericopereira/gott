@@ -12,7 +12,7 @@ use File::Path    qw(make_path);
 use POSIX         qw(strftime);
 use Cwd           qw(getcwd);
 
-our $VERSION = '0.2.0';
+our $VERSION = '0.3.0';
 
 # ── colour helpers ─────────────────────────────────────────────────────────
 
@@ -112,6 +112,7 @@ HELP
   git-pull                Fetch from git remote into local got repo
   git-push   [branch]     Push got commits upstream to git remote
   sync                    git-pull then rebase current branch on top
+  rebase     [base]       Rebase current branch onto base (default: origin/main)
   patch      [n]          Export last n commits as patch files (default 1)
   apply      <file.patch> Apply a patch file to the work tree
   stash                   Save uncommitted changes to a temp branch
@@ -285,7 +286,7 @@ sub cmd_git_pull {
     print "Fetching from " . cyan($url) . " ...\n";
     # got fetch works over git:// https:// and ssh://
     run( 'got', 'fetch', '-r', $url, '-R', $repo );
-    print green("Fetch complete.") . " Run 'gott sync' to rebase.\n";
+    print green("Fetch complete.") . " Run 'gott rebase' or 'gott sync' to rebase.\n";
 }
 
 sub cmd_git_push {
@@ -318,6 +319,22 @@ sub cmd_sync {
         exit 1;
     }
     print green("Sync complete.") . "\n";
+}
+
+sub cmd_rebase {
+    my ($new_base) = @_;
+    worktree_or_die();
+    $new_base //= 'refs/remotes/origin/main';
+    my $branch = current_branch();
+    print "Rebasing " . cyan($branch) . " onto " . cyan($new_base) . " ...\n";
+    my $rc = system( 'got', 'rebase', $new_base );
+    if ( $rc != 0 ) {
+        print red("Rebase has conflicts.") . " Resolve, then:\n";
+        print "  got rebase -c   # continue\n";
+        print "  got rebase -a   # abort\n";
+        exit 1;
+    }
+    print green("Rebase complete.") . "\n";
 }
 
 sub cmd_patch {
@@ -434,6 +451,7 @@ my %dispatch = (
     'git-pull'   => \&cmd_git_pull,
     'git-push'   => \&cmd_git_push,
     sync         => \&cmd_sync,
+    rebase       => \&cmd_rebase,
     patch        => \&cmd_patch,
     apply        => \&cmd_apply,
     stash        => \&cmd_stash,
