@@ -17,3 +17,6 @@ nytprof.out
 *.swo
 *~
 .DS_Store
+
+# Claude Code
+.claude/
