@@ -1,5 +1,208 @@
 Revision history for gott
 
+0.20.0  2026-02-18
+  - Correctness: _touch_file() now checks the return value of close; although
+    no data is written, an unchecked close leaves a theoretical error path
+    undetected; consistent with _write_file() which already checks close
+
+0.19.0  Unreleased
+  - Correctness: cmd_patch() now checks the return value of print inside the
+    diff callback and of close on the output file handle; a disk-full error
+    mid-write was silently ignored, leaving a truncated .patch file with no
+    error; the partial file is now unlinked on any write or close failure
+  - Correctness: cmd_stash() now wraps the got switch/add/commit sequence in
+    eval and performs best-effort cleanup (switch back to original branch,
+    delete partial stash branch) if any step fails; previously a failure after
+    switching to the stash branch left the repo stranded on that branch with
+    no way to recover automatically
+
+0.18.0  Unreleased
+  - Correctness: _validate_branch_name() now guards against undef/empty $name
+    with a structured E012 error; previously an undef argument produced an
+    "uninitialized value" warning from the regex rather than a clean error
+  - Correctness: cmd_patch() integer check now uses [0-9] instead of \d;
+    \d matches Unicode digits in some locales, [0-9] is unambiguous for
+    a decimal count argument
+  - Correctness: cmd_stash() now checks for stash branch collision before
+    calling got branch -c; running gott stash twice in the same second
+    (e.g. in a script) previously caused a raw run() failure instead of
+    a structured error; E215 (stash branch already exists) added
+  - Correctness: _write_file() now checks the return value of print and
+    close; a disk-full or permission error mid-write was silently ignored,
+    leaving a truncated file with no error message
+  - Correctness: _list_branches() now uses open/close/$? instead of
+    capture(); a non-zero exit from got branch was silently ignored,
+    causing cmd_branches and _branch_exists() to see an empty/partial list;
+    E216 (got branch non-zero exit) added
+  - Correctness: _got_rebase() now uses die "\n" instead of exit 1;
+    exit from a library sub bypassed the top-level eval error handler
+    and would terminate a test harness; conflict hint messages moved to
+    STDERR; top-level handler now suppresses its own "Error:" line when
+    the dying sub already printed its message
+
+0.17.0  Unreleased
+  - Correctness: _validate_branch_name() now rejects '..' sequences in branch
+    names (e.g. 'feat..old'); the regex allowed individual dots so '..' was
+    accepted silently, but '..' has special meaning as a range operator in
+    got/git and could cause unexpected behaviour; E012 message updated to
+    document the restriction
+
+0.16.0  Unreleased
+  - Correctness: _c() now checks -t STDERR in addition to -t STDOUT; colours
+    were suppressed on stderr (errors, hints) when stdout was redirected to a
+    pipe even if stderr was still a terminal
+  - Correctness: cmd_new() now warns if unlink of the seed README fails; a
+    silent failure left the file in the import tree and it would appear in the
+    checked-out work tree after got checkout
+  - Correctness: cmd_clone() now gives E002 when the derived directory name is
+    empty after stripping the .git suffix (e.g. URL ending in '/.git' or bare
+    'http://') instead of passing an empty string to got checkout
+
+0.15.0  Unreleased
+  - Correctness: cmd_clone() now strips trailing slashes from URL before
+    calling basename(); a URL ending in '/' produced an empty $dir, causing
+    got checkout to target the current directory silently
+  - Correctness: _in_dir() now warns if chdir back to the original cwd fails
+    (e.g. the directory was deleted during the callback) instead of silently
+    leaving the process in an unknown working directory
+  - Correctness: cmd_unstash() now gives E307 ("stash file is empty or
+    corrupt") when the gott-stash file is empty; previously it fell through to
+    E304 ("stash branch '' no longer exists") which was misleading
+  - Error catalogue: E307 (stash file empty/corrupt) added
+  - Portability: $DEFAULT_REPO_DIR now falls back to getpwuid homedir then
+    /tmp when $ENV{HOME} is unset (stripped environment / daemon context)
+
+0.14.0  Unreleased
+  - Correctness: repo_path() now returns '' (not undef) when .got/repository
+    is empty, and dies with E209 rather than silently returning undef which
+    caused silent string-concatenation corruption in every caller
+  - Correctness: _find_worktree_root() loop now checks '/' itself before
+    stopping; previously the condition `while ($dir ne '/')` skipped the
+    filesystem root entirely
+  - Correctness: cmd_patch() die fallback now emits a non-empty message when
+    $@ is somehow empty; `die $@` with an empty string is a silent no-op
+  - Correctness: cmd_unstash() now warns if unlink of the stash file fails;
+    previously a silent failure left a stale stash pointer to a deleted branch,
+    causing E304 on the next gott unstash with no recovery path
+
+0.13.0  Unreleased
+  - Correctness: capture() comment corrected — open('-|') does not suppress
+    stderr; it passes through to the terminal (comment said "suppressed")
+  - Correctness: _read_file() now returns '' instead of undef on an empty
+    file; previously chomp on undef produced no warning but callers received
+    undef, causing sprintf warnings (e.g. err('E304', undef) in cmd_unstash)
+
+0.12.0  Unreleased
+  - Correctness: _make_dir() now catches make_path() exceptions via eval;
+    previously File::Path::make_path throws on failure — the bare
+    "or err(...)" guard never ran, so mkdir errors were invisible
+  - Correctness: _got_log_lines() and _got_diff_commit() now check $? after
+    close $fh; a mid-stream pipe failure was silently ignored
+  - Error catalogue: E214 (pipe closed non-zero exit) added for the above
+  - Correctness: cmd_patch() unlinks the partial .patch file when
+    _got_diff_commit fails mid-write, leaving no stale artefacts on disk
+
+0.11.0  Unreleased
+  - Error catalogue: E2xx range re-sorted into strict numeric order
+    (E212 was inserted out of sequence between E208 and E209)
+  - Error catalogue: E213 (got status non-zero exit) added; previously
+    err('E211', 'non-zero exit') produced "Cannot open got status:
+    non-zero exit" — now E213 carries the actual exit code ($? >> 8)
+  - Error catalogue: E901 (pipe failure) and E902 (fork failure) added;
+    _run_pipe() now uses err() instead of raw die for OS-level failures;
+    comment reserved E9xx range but no codes existed until now
+
+0.10.0  Unreleased
+  - Error catalogue: E211 (got status failure) added; cmd_stash now uses
+    err() instead of raw die for both the open failure and non-zero exit
+  - Error catalogue: E212 (got diff failure) added; E208 was incorrectly
+    used for both got log and got diff — each now has its own code and
+    accurate message
+  - DRY: _got_diff_commit($hash, $cb) extracted as a got primitive;
+    cmd_patch no longer has an inline open('-|', 'got', 'diff', ...) loop
+
+0.9.0  Unreleased
+  - DRY: _run_pipe(@cmd) extracted — fork+pipe+exec+waitpid pattern was
+    duplicated verbatim in run() and _got_rebase(); now both compose on top
+    of one shared primitive; _print_stderr() extracted alongside it
+  - Correctness: run() error label was always "got error:" even when running
+    non-got tools (patch, git); now shows the actual command name
+  - Correctness: cmd_new unlink $readme moved inside the _in_dir block so
+    the temp README is always cleaned up, even if _got_import throws
+  - Correctness: cmd_stash now detects "got status" command failure vs.
+    truly empty status; previously both returned '' from capture(), so a
+    got failure would silently print "Nothing to stash."
+  - Error catalogue: E210 (cannot chdir) and E306 (cannot determine branch)
+    added; _in_dir() and current_branch() now use err() instead of raw die
+
+0.8.0  Unreleased
+  - DRY: _got_log_hashes() now implemented on top of _got_log_lines();
+    the duplicate open/loop/close pattern is gone
+  - Error catalogue: E206–E209 added for mkdir, touch, got-log, and
+    .got/repository read failures; all remaining raw die strings in
+    _make_dir, _touch_file, repo_path, cmd_patch, and _got_log_lines
+    now use err() for structured output
+  - Housekeeping: stale FIX #N development comments removed from source
+
+0.7.0  Unreleased
+  - Correctness: current_branch() now dies clearly instead of silently
+    returning 'main' when got info fails or the branch cannot be determined
+  - DRY: _list_branches() extracted; cmd_branches and _branch_exists() share
+    one got-branch call site instead of duplicating split/capture
+  - _got_rebase() no longer uses bare system() — uses the same fork+pipe
+    pattern as run(), so got's stderr is surfaced in red on rebase failure;
+    conflict hint still printed before exit
+  - DRY: _got_log_lines($cb, [$branch]) extracted as a streaming primitive;
+    cmd_log now uses it instead of an inline open('-|', ...) loop
+  - DRY: _seed_readme() now uses _write_file() instead of its own
+    open/print/close block
+  - Error catalogue: E204 (cannot write) and E205 (cannot read) added;
+    _write_file() and _read_file() now use err() for structured errors
+  - _in_dir() now restores cwd even if the callback throws (eval guard)
+
+0.6.0  Unreleased
+  - New command: gott create <file|dir|branch|repo> — macro subcommand
+    dispatcher; adding a new create subcommand now requires one entry in
+    %CREATE_SUBS (help auto-generates from the same table)
+  - Error catalogue: all user-facing errors now live in %ERRORS as
+    coded entries (E001–E402) with msg + hint fields; dispatcher surfaces
+    hint automatically below the error code
+  - Security: capture() rewritten from qx($string) to list-form pipe
+    open('-|', @cmd), eliminating shell interpolation entirely
+  - Performance: _find_worktree_root() replaces separate in_worktree()
+    and repo_path() directory walks — one traversal serves both callers
+  - DRY: _got_log_hashes([$branch]) merges two former subs; optional
+    branch arg replaces _got_log_hash_for_branch()
+  - DRY: %CREATE_SUBS and %DISPATCH hoisted to package-level constants;
+    cmd_create no longer rebuilds its lookup table on every call
+  - DRY: %HELP_CMDS replaces three-way string comparison in got guard
+  - got_required() now bypassed for help/-h/--help (was checked first,
+    blocking help output when got was not installed)
+  - got_required() prints a structured install message instead of a
+    generic die error
+  - dim() colour helper added; status labels now use label:value style
+  - All single-purpose got ops extracted into _got_* primitives layer;
+    cmd_* subs are now thin orchestrators
+  - fs primitives extracted: _ensure_new_path, _make_dir, _touch_file,
+    _seed_readme, _in_dir — shared across create handlers and cmd_new
+  - cmd_nb now delegates to _create_branch (was a duplicate)
+
+0.5.0  Unreleased
+  - run() now captures stderr via fork+pipe and surfaces it in red on
+    failure; stdout still streams live to the terminal
+  - pre-flight checks added to cmd_switch (branch must exist),
+    cmd_nb/_create_branch (branch must not exist), cmd_undo (file must
+    exist), cmd_clone (dir/repo must not exist), cmd_apply (file must
+    exist, must be .patch, patch binary check), cmd_git_remote (URL
+    format validation), cmd_git_push (branch name validation),
+    cmd_unstash (stash branch still exists)
+  - patch_required() added — checks patch binary before cmd_apply
+  - cmd_patch: rejects n=0, errors clearly when repo has no commits
+  - _validate_name() and _validate_branch_name() added for shared input
+    validation across create handlers and branch commands
+  - _branch_exists() added for pre-flight branch checks
+  - _fetch_remote() primitive added; shared by cmd_git_pull and cmd_sync
+
 0.4.0  2026-02-16
   - Restructured command definitions into @COMMANDS array of hashrefs:
     adding a command now requires editing one line + writing one sub,

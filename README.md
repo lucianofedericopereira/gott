@@ -659,6 +659,7 @@ sudo sh install.sh
 |---|---|
 | `gott new <name> [dir]` | Init bare repo + work tree in one step |
 | `gott clone <url> [dir]` | Clone and check out (got clone + checkout) |
+| `gott create <file\|dir\|branch\|repo> <name>` | Create a file, directory, branch, or repo |
 | `gott snap [msg]` | `got add -R .` then `got commit` |
 | `gott log` | Colour-highlighted log |
 | `gott branches` | List branches, current highlighted in green |
@@ -773,15 +774,21 @@ Fields:
 - `desc` — one-line description shown in help
 - `code` — `\&cmd_mycommand` links to the sub you write in step 2
 
-**2. Write a sub below the `@COMMANDS` block:**
+**2. Add an error entry to `%ERRORS` if your command has new failure modes:**
+
+```perl
+E016 => { msg => 'Usage: gott mycommand <arg>', hint => '' },
+```
+
+**3. Write a sub below the `@COMMANDS` block:**
 
 ```perl
 sub cmd_mycommand {
     my ($arg) = @_;                          # arguments from the command line
-    die "Usage: gott mycommand <arg>\n" unless $arg;
+    err('E016') unless $arg;                 # coded error from %ERRORS
     worktree_or_die();                       # optional: fail if not inside a got repo
-    run( 'got', 'somecommand', $arg );       # run a got command
-    print "Done: $arg\n";
+    run( 'got', 'somecommand', $arg );       # run a got command — no shell, safe
+    print green("Done.") . " $arg\n";
 }
 ```
 
@@ -789,20 +796,66 @@ That is all. Help output and dispatch are updated automatically.
 
 ### Helpers available in the script
 
+**Running commands**
+
 | Helper | What it does |
 |---|---|
-| `run('cmd', 'arg', ...)` | Run a command, die on failure |
-| `capture('cmd args')` | Run a command, return its output as a string |
-| `worktree_or_die()` | Die with a clear message if not inside a got work tree |
-| `author_required()` | Die if `GOT_AUTHOR` is not set |
-| `git_required()` | Die if `git` is not on `$PATH` |
+| `run('cmd', 'arg', ...)` | Run a command (list form, no shell), stream stdout live, die with stderr on failure |
+| `capture('cmd', 'arg', ...)` | Run a command (list form, no shell), return trimmed stdout |
+
+**Guards — call at the top of a command sub**
+
+| Helper | What it does |
+|---|---|
+| `worktree_or_die()` | Die with E301 if not inside a got work tree |
+| `author_required()` | Die with E102 if `GOT_AUTHOR` is not set |
+| `git_required()` | Die with E101 if `git` is not on `$PATH` |
+| `patch_required()` | Die with E101 if `patch` is not on `$PATH` |
+
+**Errors — single source of truth**
+
+| Helper | What it does |
+|---|---|
+| `err('E001')` | Die with a coded error from `%ERRORS`; hint printed automatically |
+| `err('E401', $branch, $branch)` | Same, with sprintf args for `%s` placeholders in msg/hint |
+
+**Information**
+
+| Helper | What it does |
+|---|---|
 | `current_branch()` | Return the current branch name as a string |
-| `repo_path()` | Return the path to the bare `.git` repo |
-| `timestamp()` | Return a sortable timestamp string like `20260215-143201` |
+| `repo_path()` | Return the absolute path to the bare repo |
+| `timestamp()` | Return a sortable timestamp like `20260218-143201` |
+
+**Filesystem primitives**
+
+| Helper | What it does |
+|---|---|
+| `_make_dir($path)` | Create directory tree, die on failure |
+| `_touch_file($path)` | Create an empty file, die on failure |
+| `_ensure_new_path($path, $label)` | Die with E201 if `$path` already exists |
+| `_in_dir($dir, sub { ... })` | chdir to `$dir`, run code block, chdir back |
 | `_read_file($path)` | Read one line from a file, return it chomped |
 | `_write_file($path, $content)` | Write one line to a file |
-| `_do_rebase($base)` | Run `got rebase`, print conflict hints on failure |
-| `green/cyan/yellow/red/bold($text)` | Colour a string for terminal output |
+
+**got primitives — one action each, no output**
+
+| Helper | What it does |
+|---|---|
+| `_got_new_branch($name)` | `got branch -c $name` |
+| `_got_switch($branch)` | `got update -b $branch` |
+| `_got_add_all()` | `got add -R .` |
+| `_got_commit($msg)` | `got commit -m $msg` |
+| `_got_revert_all()` / `_got_revert_file($f)` | `got revert` |
+| `_got_rebase($base)` | `got rebase`, prints conflict guidance on failure |
+| `_got_log_hashes([$branch])` | Return list of commit hashes newest-first |
+| `_branch_exists($name)` | Return true if branch is listed by `got branch` |
+
+**Colour**
+
+| Helper | What it does |
+|---|---|
+| `green/cyan/yellow/red/bold/dim($text)` | ANSI colour (no-op when not a TTY) |
 
 ### Running the tests
 

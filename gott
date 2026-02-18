@@ -12,86 +12,446 @@ use File::Path    qw(make_path);
 use POSIX         qw(strftime);
 use Cwd           qw(getcwd);
 
-our $VERSION = '0.4.0';
+our $VERSION = '0.20.0';
 
 # ── configuration ───────────────────────────────────────────────────────────
 # Change DEFAULT_REPO_DIR to use a different base directory for new repos.
 
-our $DEFAULT_REPO_DIR = $ENV{HOME} . '/Repos';
+our $DEFAULT_REPO_DIR = ( $ENV{HOME} // ( getpwuid($<) )[7] // '/tmp' ) . '/Repos';
 
 # ── colour helpers ─────────────────────────────────────────────────────────
 
-sub _c    { -t STDOUT ? "\033[$_[0]m$_[1]\033[0m" : $_[1] }
+sub _c    { (-t STDOUT || -t STDERR) ? "\033[$_[0]m$_[1]\033[0m" : $_[1] }
 sub yellow { _c( 33, $_[0] ) }
 sub cyan   { _c( 36, $_[0] ) }
 sub green  { _c( 32, $_[0] ) }
 sub red    { _c( 31, $_[0] ) }
 sub bold   { _c( 1,  $_[0] ) }
+sub dim    { _c( 2,  $_[0] ) }
 
-# ── helpers ────────────────────────────────────────────────────────────────
+# ── error catalogue ────────────────────────────────────────────────────────
+# Single source of truth for all user-facing errors.
+# Ranges: E0xx usage/args  E1xx env/prereqs  E2xx filesystem
+#         E3xx worktree    E4xx git ops      E9xx internal
+#
+# msg  — shown to user; use %s for sprintf placeholders.
+# hint — shown below the error as a next-step suggestion ('' = none).
 
-sub run {
-    my (@cmd) = @_;
-    system(@cmd) == 0 or die "Command failed: @cmd\n";
+our %ERRORS = (
+    # ── usage / arguments ──────────────────────────────────────────────────
+    E001 => { msg => 'Usage: gott new <name> [dir]',                         hint => '' },
+    E002 => { msg => 'Usage: gott clone <url> [dir]',                        hint => '' },
+    E003 => { msg => 'Usage: gott switch <branch>',                          hint => '' },
+    E004 => { msg => 'Usage: gott nb <branch>',                              hint => '' },
+    E005 => { msg => 'Usage: gott create branch <name>',                     hint => '' },
+    E006 => { msg => 'Usage: gott create <%s> <name> [opts]',                hint => '' },
+    E007 => { msg => 'Usage: gott apply <file.patch>',                       hint => '' },
+    E008 => { msg => 'Usage: gott patch [n]  (n must be a positive integer)', hint => '' },
+    E009 => { msg => 'n must be at least 1',                                  hint => '' },
+    E010 => { msg => 'Name required for: gott create %s <name>',             hint => '' },
+    E011 => { msg => "Invalid name '%s': must not contain path separators or '..'", hint => '' },
+    E012 => { msg => "Invalid branch name '%s': use letters, digits, '.', '-', '_', '/'; no '..' sequences", hint => '' },
+    E013 => { msg => "Invalid branch name '%s': must not start or end with '/'", hint => '' },
+    E014 => { msg => "Invalid remote URL: '%s'",                              hint => 'Expected: https://host/repo, git://..., ssh://..., or user@host:path' },
+    E015 => { msg => "Expected a .patch file, got: %s",                      hint => '' },
+
+    # ── environment / prerequisites ────────────────────────────────────────
+    E101 => { msg => '%s not found. %s',                                      hint => '' },
+    E102 => { msg => 'GOT_AUTHOR is not set',                                 hint => 'Export it: export GOT_AUTHOR="Your Name <you@example.com>"' },
+
+    # ── filesystem ─────────────────────────────────────────────────────────
+    E201 => { msg => '%s already exists: %s',                                 hint => '' },
+    E202 => { msg => 'File not found: %s',                                    hint => '' },
+    E203 => { msg => 'No commits found in this repo',                         hint => '' },
+    E204 => { msg => 'Cannot write %s: %s',                                   hint => '' },
+    E205 => { msg => 'Cannot read %s: %s',                                    hint => '' },
+    E206 => { msg => 'Cannot create directory %s: %s',                        hint => '' },
+    E207 => { msg => 'Cannot create file %s: %s',                             hint => '' },
+    E208 => { msg => 'Cannot run got log: %s',                                hint => '' },
+    E209 => { msg => 'Cannot read .got/repository: %s',                       hint => '' },
+    E210 => { msg => 'Cannot change to directory %s: %s',                     hint => '' },
+    E211 => { msg => 'Cannot open got status: %s',                            hint => '' },
+    E212 => { msg => 'Cannot run got diff: %s',                               hint => '' },
+    E213 => { msg => 'got status exited with code %s',                        hint => '' },
+    E214 => { msg => '%s pipe closed with non-zero exit: %s',                 hint => '' },
+    E215 => { msg => 'Stash branch %s already exists; remove it or wait a second and retry', hint => '' },
+    E216 => { msg => 'got branch exited with code %s',                       hint => '' },
+
+    # ── worktree / repo ────────────────────────────────────────────────────
+    E301 => { msg => 'Not inside a got work tree (no .got found)',            hint => 'Run from inside a work tree, or: gott new <name>' },
+    E302 => { msg => 'No git remote set',                                     hint => 'Set one with: gott git-remote <url>' },
+    E303 => { msg => 'No stash found',                                        hint => 'Create one with: gott stash' },
+    E304 => { msg => "Stash branch '%s' no longer exists",                   hint => 'The stash branch was deleted manually. Remove the gott-stash file in your repo.' },
+    E305 => { msg => "Cannot find stash commit on branch %s",                hint => '' },
+    E306 => { msg => 'Cannot determine current branch',                       hint => 'Run from inside a work tree with at least one commit' },
+    E307 => { msg => 'Stash file is empty or corrupt',                        hint => 'Remove the gott-stash file in your repo and try gott stash again' },
+
+    # ── git / branch ops ───────────────────────────────────────────────────
+    E401 => { msg => "Branch '%s' does not exist",                           hint => 'Create it with: gott nb %s' },
+    E402 => { msg => "Branch '%s' already exists",                           hint => 'Switch to it with: gott switch %s' },
+
+    # ── internal / OS ──────────────────────────────────────────────────────
+    E901 => { msg => 'pipe() failed: %s',                                     hint => '' },
+    E902 => { msg => 'fork() failed: %s',                                     hint => '' },
+);
+
+# err($code, @args) — die with a coded, structured error message.
+# @args are sprintf'd into the msg (and hint where %s appears).
+sub err {
+    my ( $code, @args ) = @_;
+    my $entry = $ERRORS{$code} or die "Unknown error code: $code\n";
+    my $msg  = @args ? sprintf( $entry->{msg}, @args ) : $entry->{msg};
+    my $hint = ( @args && $entry->{hint} ) ? sprintf( $entry->{hint}, @args ) : $entry->{hint};
+    # Format: "E001: <msg>\0<hint>\n"  (\0 as internal separator)
+    die "$code: $msg\0$hint\n";
 }
 
+# ── low-level helpers ──────────────────────────────────────────────────────
+
+# _run_pipe(@cmd) — fork+exec @cmd, capturing stderr while stdout passes through.
+# Returns ($exit_code, $stderr_string).  Dies only on pipe/fork failure (OS error).
+sub _run_pipe {
+    my (@cmd) = @_;
+    my ( $err_r, $err_w );
+    pipe( $err_r, $err_w ) or err( 'E901', $! );
+    my $pid = fork() // err( 'E902', $! );
+    if ( $pid == 0 ) {
+        close $err_r;
+        open( STDERR, '>&', $err_w ) or POSIX::_exit(1);
+        close $err_w;
+        exec(@cmd) or POSIX::_exit(127);
+    }
+    close $err_w;
+    my $stderr = do { local $/; <$err_r> };
+    close $err_r;
+    waitpid( $pid, 0 );
+    return ( $?, $stderr // '' );
+}
+
+# _print_stderr($tool, $stderr) — print captured stderr indented, in red.
+sub _print_stderr {
+    my ( $tool, $stderr ) = @_;
+    return unless defined $stderr && $stderr =~ /\S/;
+    chomp $stderr;
+    $stderr =~ s/^/  /gm;
+    print STDERR red("$tool error:") . "\n$stderr\n";
+}
+
+# run(@cmd) — run a command, streaming stdout to the terminal.
+# On failure, surface the command's stderr in red then die.
+sub run {
+    my (@cmd) = @_;
+    my ( $rc, $stderr ) = _run_pipe(@cmd);
+    if ( $rc != 0 ) {
+        _print_stderr( $cmd[0], $stderr );
+        die "Command failed: @cmd\n";
+    }
+}
+
+# capture(@cmd) — run a command via list-form pipe (no shell interpolation),
+# return trimmed stdout. stderr passes through to the terminal.
 sub capture {
-    my $out = `@_ 2>/dev/null`;
-    chomp $out;
-    return $out;
+    my (@cmd) = @_;
+    open( my $fh, '-|', @cmd ) or return '';
+    my $out = do { local $/; <$fh> };
+    close $fh;
+    chomp $out if defined $out;
+    return $out // '';
+}
+
+# ── prerequisite guards ────────────────────────────────────────────────────
+
+# cmd_required($tool, $hint) — die with install hint if $tool not on PATH.
+sub cmd_required {
+    my ( $tool, $hint ) = @_;
+    $hint //= "Install $tool to use this command.";
+    capture( 'which', $tool ) or err( 'E101', $tool, $hint );
 }
 
 sub got_required {
-    capture('which got') or die "got not found. Install from https://gameoftrees.org\n";
+    unless ( capture( 'which', 'got' ) ) {
+        print STDERR bold("got") . " is not installed.\n";
+        print STDERR "  Install it from: " . cyan('https://gameoftrees.org') . "\n";
+        print STDERR "  On Debian/Ubuntu: dpkg -i builds/got_*_amd64.deb\n";
+        exit 1;
+    }
 }
 
 sub git_required {
-    capture('which git') or die "git not found. Install git to use git-interop commands.\n";
+    cmd_required( 'git', 'Install git to use git-interop commands.' );
+}
+
+sub patch_required {
+    cmd_required( 'patch', 'Install the patch utility (usually in the "patch" package).' );
 }
 
 sub author_required {
-    $ENV{GOT_AUTHOR} or die <<'END';
-GOT_AUTHOR is not set.
-Export it before using gott, e.g.:
-  export GOT_AUTHOR="Your Name <you@example.com>"
-END
+    $ENV{GOT_AUTHOR} or err('E102');
 }
 
-sub in_worktree {
+# ── worktree / repo helpers ────────────────────────────────────────────────
+
+# _find_worktree_root() — walk up from cwd looking for a .got dir.
+# Returns the worktree root path, or '' if not inside a worktree.
+sub _find_worktree_root {
     my $dir = getcwd();
-    while ( $dir ne '/' ) {
-        return 1 if -d "$dir/.got";
+    while (1) {
+        return $dir if -d "$dir/.got";
+        last if $dir eq '/';
         $dir = dirname($dir);
     }
-    return 0;
+    return '';
 }
 
+sub in_worktree { _find_worktree_root() ne '' }
+
 sub worktree_or_die {
-    in_worktree() or die "Not inside a got work tree (no .got found).\n";
+    in_worktree() or err('E301');
 }
 
 sub repo_path {
-    my $dir = getcwd();
-    while ( $dir ne '/' ) {
-        my $f = "$dir/.got/repository";
-        if ( -f $f ) {
-            open( my $fh, '<', $f ) or die "Cannot read $f: $!\n";
-            my $repo = <$fh>;
-            chomp $repo;
-            return $repo;
-        }
-        $dir = dirname($dir);
-    }
-    die "Cannot find .got/repository\n";
+    my $root = _find_worktree_root() or err('E301');
+    my $f = "$root/.got/repository";
+    open( my $fh, '<', $f ) or err( 'E209', $! );
+    my $repo = <$fh> // '';
+    chomp $repo;
+    err( 'E209', 'file is empty' ) unless $repo ne '';
+    return $repo;
 }
 
 sub current_branch {
-    my $info = capture('got info 2>/dev/null');
+    my $info = capture( 'got', 'info' );
     return $1 if $info =~ /work tree branch:\s*(\S+)/;
-    return 'main';
+    err('E306');
 }
 
 sub timestamp { strftime( '%Y%m%d-%H%M%S', localtime ) }
+
+# ── file I/O helpers ───────────────────────────────────────────────────────
+
+sub _write_file {
+    my ( $path, $content ) = @_;
+    open( my $fh, '>', $path ) or err( 'E204', $path, $! );
+    ( print $fh $content, "\n" ) or do { my $e = $!; close $fh; err( 'E204', $path, $e ) };
+    close $fh or err( 'E204', $path, $! );
+}
+
+sub _read_file {
+    my ($path) = @_;
+    open( my $fh, '<', $path ) or err( 'E205', $path, $! );
+    my $line = <$fh> // '';
+    chomp $line;
+    return $line;
+}
+
+sub _remote_file { repo_path() . '/gott-remote' }
+
+sub _read_remote {
+    my $file = _remote_file();
+    err('E302') unless -f $file;
+    return _read_file($file);
+}
+
+# ── validation helpers ─────────────────────────────────────────────────────
+
+# _validate_name($name, $what) — ensure name is a plain filename / dirname.
+sub _validate_name {
+    my ( $name, $what ) = @_;
+    err( 'E010', $what ) unless defined $name && $name ne '';
+    err( 'E011', $name ) if $name =~ m{[/\\]|\.\.};
+}
+
+# _validate_branch_name($name) — ensure branch name is sane.
+sub _validate_branch_name {
+    my ($name) = @_;
+    err( 'E012', $name // '' ) unless defined $name && $name ne '';
+    err( 'E012', $name ) unless $name =~ /^[A-Za-z0-9._\-\/]+$/;
+    err( 'E012', $name ) if $name =~ /\.\./;
+    err( 'E013', $name ) if $name =~ m{^/|/$};
+}
+
+# _list_branches() — return list of branch names from got.
+sub _list_branches {
+    open( my $fh, '-|', 'got', 'branch' ) or err( 'E216', $! );
+    my @branches = map { chomp; $_ } <$fh>;
+    close $fh;
+    err( 'E216', $? >> 8 ) if $? != 0;
+    return @branches;
+}
+
+# _branch_exists($name) — true if the branch is listed by got.
+sub _branch_exists {
+    my ($name) = @_;
+    return scalar grep { $_ eq $name } _list_branches();
+}
+
+# ── fs primitives ─────────────────────────────────────────────────────────
+# Filesystem ops shared across commands.
+
+# _ensure_new_path($path, $label) — die if $path already exists.
+sub _ensure_new_path {
+    my ( $path, $label ) = @_;
+    err( 'E201', $label, $path ) if -e $path;
+}
+
+# _make_dir($path) — create directory tree, die on failure.
+# make_path() throws on failure (doesn't return false), so we catch with eval.
+sub _make_dir {
+    my ($path) = @_;
+    eval { make_path($path) };
+    if ( $@ || !-d $path ) {
+        ( my $reason = $@ || $! ) =~ s/ at \S+ line \d+\.\n?$//;
+        err( 'E206', $path, $reason );
+    }
+}
+
+# _touch_file($path) — create an empty file, die on failure.
+sub _touch_file {
+    my ($path) = @_;
+    open( my $fh, '>', $path ) or err( 'E207', $path, $! );
+    close $fh or err( 'E207', $path, $! );
+}
+
+# _seed_readme($dir, $name) — write a minimal README.md, return its path.
+sub _seed_readme {
+    my ( $dir, $name ) = @_;
+    my $readme = "$dir/README.md";
+    my $date   = strftime( '%Y-%m-%d', localtime );
+    _write_file( $readme, "# $name\n\nCreated with gott on $date" );
+    return $readme;
+}
+
+# _in_dir($dir, $code) — chdir to $dir, run $code, chdir back.
+# Uses eval/die to restore cwd even if $code throws.
+sub _in_dir {
+    my ( $dir, $code ) = @_;
+    my $cwd = getcwd();
+    chdir($dir) or err( 'E210', $dir, $! );
+    my $err = do { local $@; eval { $code->() }; $@ };
+    chdir($cwd) or warn "Warning: could not restore working directory '$cwd': $!\n";
+    die $err if $err;
+}
+
+# ── got primitives ─────────────────────────────────────────────────────────
+# Small, single-purpose ops that cmd_* subs compose.
+# Each primitive focuses on ONE action and does not print user-facing messages
+# (the calling command owns the narrative).
+
+sub _got_init_repo  { my ($r)    = @_; run( 'got', 'init',      $r            ) }
+sub _got_clone      { my ($u,$r) = @_; run( 'got', 'clone',     $u, $r        ) }
+sub _got_checkout   { my ($r,$t) = @_; run( 'got', 'checkout',  $r, $t        ) }
+sub _got_add_all    {                   run( 'got', 'add', '-R', '.'           ) }
+sub _got_revert_all {                   run( 'got', 'revert',    '.'           ) }
+sub _got_unstage_all{                   run( 'got', 'unstage',   '.'           ) }
+
+sub _got_import {
+    my ( $repo, $msg ) = @_;
+    run( 'got', 'import', '-m', $msg, '-r', $repo, '.' );
+}
+
+sub _got_commit {
+    my ($msg) = @_;
+    run( 'got', 'commit', '-m', $msg );
+}
+
+sub _got_new_branch {
+    my ($name) = @_;
+    run( 'got', 'branch', '-c', $name );
+}
+
+sub _got_switch {
+    my ($branch) = @_;
+    run( 'got', 'update', '-b', $branch );
+}
+
+sub _got_revert_file {
+    my ($file) = @_;
+    run( 'got', 'revert', $file );
+}
+
+sub _got_fetch {
+    my ( $url, $repo ) = @_;
+    run( 'got', 'fetch', '-r', $url, '-R', $repo );
+}
+
+# _fetch_remote() — read saved remote, print label, fetch.
+# Shared by git-pull and sync.
+sub _fetch_remote {
+    my $url  = _read_remote();
+    my $repo = repo_path();
+    print dim("fetch:") . " " . cyan($url) . "\n";
+    _got_fetch( $url, $repo );
+    return $url;
+}
+
+sub _got_send {
+    my ( $branch, $url ) = @_;
+    run( 'got', 'send', '-b', $branch, '-r', $url );
+}
+
+sub _got_cherrypick {
+    my ($hash) = @_;
+    run( 'got', 'cherrypick', $hash );
+}
+
+sub _got_delete_branch {
+    my ($name) = @_;
+    run( 'got', 'branch', '-d', $name );
+}
+
+sub _got_diff_commit {
+    my ( $hash, $cb ) = @_;
+    open( my $fh, '-|', 'got', 'diff', '-c', $hash ) or err( 'E212', $! );
+    $cb->($_) while <$fh>;
+    close $fh;
+    err( 'E214', 'got diff', $? >> 8 ) if $? != 0;
+}
+
+sub _got_rebase {
+    my ($base) = @_;
+    # Like run(), but on failure we print a conflict hint instead of a generic die.
+    # die with "\n" (bare newline) so the top-level handler suppresses its own
+    # "Error:" line — the conflict message was already printed here.
+    my ( $rc, $stderr ) = _run_pipe( 'got', 'rebase', $base );
+    if ( $rc != 0 ) {
+        _print_stderr( 'got', $stderr );
+        print STDERR red("Rebase has conflicts.") . " Resolve, then:\n";
+        print STDERR "  got rebase -c   # continue\n";
+        print STDERR "  got rebase -a   # abort\n";
+        die "\n";
+    }
+}
+
+# _got_log_lines($cb, [$branch]) — stream got log lines, calling $cb for each.
+# Shared by cmd_log (pretty-print) and _got_log_hashes (hash extraction).
+sub _got_log_lines {
+    my ( $cb, $branch ) = @_;
+    my @cmd = ( 'got', 'log' );
+    push @cmd, '-b', $branch if defined $branch;
+    open( my $fh, '-|', @cmd ) or err( 'E208', $! );
+    $cb->($_) while <$fh>;
+    close $fh;
+    err( 'E214', 'got log', $? >> 8 ) if $? != 0;
+}
+
+# _got_log_hashes([$branch]) — return commit hashes newest-first.
+sub _got_log_hashes {
+    my ($branch) = @_;
+    my @hashes;
+    _got_log_lines( sub { push @hashes, $1 if $_[0] =~ /^commit\s+([0-9a-f]+)/ }, $branch );
+    return @hashes;
+}
+
+# ── create subcommand table ────────────────────────────────────────────────
+# Each entry: sub => coderef, usage => args string, desc => one-line description.
+# help is auto-generated from this table (see cmd_help).
+
+our %CREATE_SUBS = (
+    file   => { sub => \&_create_file,   usage => '<name>',       desc => 'Create and track a new file in the work tree'  },
+    dir    => { sub => \&_create_dir,    usage => '<name>',       desc => 'Create a new directory in the work tree'       },
+    branch => { sub => \&_create_branch, usage => '<name>',       desc => 'Create a new branch and switch to it'          },
+    repo   => { sub => \&cmd_new,        usage => '<name> [dir]', desc => 'Init a new bare repo + work tree'              },
+);
 
 # ── command definitions ────────────────────────────────────────────────────
 # To add a command: add an entry here, then write a cmd_foo sub below.
@@ -99,28 +459,40 @@ sub timestamp { strftime( '%Y%m%d-%H%M%S', localtime ) }
 # Groups: 'local' or 'git'
 
 my @COMMANDS = (
-    # name          group   usage                  description
-    { name => 'new',        group => 'local', usage => '<name> [dir]',   desc => 'Init bare repo + work tree, ready to use',          code => \&cmd_new        },
-    { name => 'clone',      group => 'local', usage => '<url> [dir]',    desc => 'Clone a remote got/git repo and check out',         code => \&cmd_clone      },
-    { name => 'snap',       group => 'local', usage => '[msg]',           desc => 'Stage all (got add -R .) then commit',              code => \&cmd_snap       },
-    { name => 'log',        group => 'local', usage => '',                desc => 'Pretty colour log',                                 code => \&cmd_log        },
-    { name => 'branches',   group => 'local', usage => '',                desc => 'List branches, highlight current',                  code => \&cmd_branches   },
-    { name => 'switch',     group => 'local', usage => '<branch>',        desc => 'Switch to branch',                                  code => \&cmd_switch     },
-    { name => 'nb',         group => 'local', usage => '<branch>',        desc => 'New branch and switch to it',                      code => \&cmd_nb         },
-    { name => 'undo',       group => 'local', usage => '[file]',          desc => 'Revert file (or all) to last commit',               code => \&cmd_undo       },
-    { name => 'info',       group => 'local', usage => '',                desc => 'Work tree info + status',                           code => \&cmd_info       },
-    { name => 'git-remote', group => 'git',   usage => '[url]',           desc => 'Show or set the upstream git remote URL',           code => \&cmd_git_remote },
-    { name => 'git-pull',   group => 'git',   usage => '',                desc => 'Fetch from git remote into local got repo',         code => \&cmd_git_pull   },
-    { name => 'git-push',   group => 'git',   usage => '[branch]',        desc => 'Push got commits upstream to git remote',           code => \&cmd_git_push   },
-    { name => 'sync',       group => 'git',   usage => '',                desc => 'git-pull then rebase current branch on top',        code => \&cmd_sync       },
-    { name => 'rebase',     group => 'git',   usage => '[base]',          desc => 'Rebase current branch onto base (default: origin/main)', code => \&cmd_rebase },
-    { name => 'patch',      group => 'git',   usage => '[n]',             desc => 'Export last n commits as patch files (default 1)', code => \&cmd_patch      },
-    { name => 'apply',      group => 'git',   usage => '<file.patch>',    desc => 'Apply a patch file to the work tree',               code => \&cmd_apply      },
-    { name => 'stash',      group => 'git',   usage => '',                desc => 'Save uncommitted changes to a temp branch',         code => \&cmd_stash      },
-    { name => 'unstash',    group => 'git',   usage => '',                desc => 'Restore most recent stash',                         code => \&cmd_unstash    },
+    # name           group    usage                           description
+    { name => 'new',        group => 'local', usage => '<name> [dir]',               desc => 'Init bare repo + work tree, ready to use',               code => \&cmd_new        },
+    { name => 'clone',      group => 'local', usage => '<url> [dir]',                desc => 'Clone a remote got/git repo and check out',              code => \&cmd_clone      },
+    { name => 'create',     group => 'local', usage => '<file|dir|branch|repo> ...',  desc => 'Create a file, dir, branch, or repo (subcommands)',       code => \&cmd_create     },
+    { name => 'snap',       group => 'local', usage => '[msg]',                       desc => 'Stage all (got add -R .) then commit',                   code => \&cmd_snap       },
+    { name => 'log',        group => 'local', usage => '',                             desc => 'Pretty colour log',                                      code => \&cmd_log        },
+    { name => 'branches',   group => 'local', usage => '',                             desc => 'List branches, highlight current',                       code => \&cmd_branches   },
+    { name => 'switch',     group => 'local', usage => '<branch>',                    desc => 'Switch to branch',                                       code => \&cmd_switch     },
+    { name => 'nb',         group => 'local', usage => '<branch>',                    desc => 'New branch and switch to it',                            code => \&cmd_nb         },
+    { name => 'undo',       group => 'local', usage => '[file]',                      desc => 'Revert file (or all) to last commit',                    code => \&cmd_undo       },
+    { name => 'info',       group => 'local', usage => '',                             desc => 'Work tree info + status',                                code => \&cmd_info       },
+    { name => 'git-remote', group => 'git',   usage => '[url]',                       desc => 'Show or set the upstream git remote URL',                code => \&cmd_git_remote },
+    { name => 'git-pull',   group => 'git',   usage => '',                             desc => 'Fetch from git remote into local got repo',              code => \&cmd_git_pull   },
+    { name => 'git-push',   group => 'git',   usage => '[branch]',                    desc => 'Push got commits upstream to git remote',                code => \&cmd_git_push   },
+    { name => 'sync',       group => 'git',   usage => '',                             desc => 'git-pull then rebase current branch on top',             code => \&cmd_sync       },
+    { name => 'rebase',     group => 'git',   usage => '[base]',                      desc => 'Rebase current branch onto base (default: origin/main)',  code => \&cmd_rebase     },
+    { name => 'patch',      group => 'git',   usage => '[n]',                         desc => 'Export last n commits as patch files (default 1)',        code => \&cmd_patch      },
+    { name => 'apply',      group => 'git',   usage => '<file.patch>',                desc => 'Apply a patch file to the work tree',                    code => \&cmd_apply      },
+    { name => 'stash',      group => 'git',   usage => '',                             desc => 'Save uncommitted changes to a temp branch',              code => \&cmd_stash      },
+    { name => 'unstash',    group => 'git',   usage => '',                             desc => 'Restore most recent stash',                              code => \&cmd_unstash    },
 );
 
-# ── help (auto-generated from @COMMANDS) ───────────────────────────────────
+# ── dispatch table ─────────────────────────────────────────────────────────
+
+our %DISPATCH = (
+    ( map { $_->{name} => $_->{code} } @COMMANDS ),
+    help     => \&cmd_help,
+    '--help' => \&cmd_help,
+    '-h'     => \&cmd_help,
+);
+
+our %HELP_CMDS = ( help => 1, '--help' => 1, '-h' => 1 );
+
+# ── help (auto-generated from @COMMANDS + %CREATE_SUBS) ────────────────────
 
 sub cmd_help {
     print bold("gott $VERSION") . " — Game of Trees companion\n\n";
@@ -130,69 +502,75 @@ sub cmd_help {
     for my $group ( 'local', 'git' ) {
         print bold( $groups{$group} ) . "\n";
         for my $c ( grep { $_->{group} eq $group } @COMMANDS ) {
-            my $left = sprintf( '  %-10s %-18s', $c->{name}, $c->{usage} );
+            my $left = sprintf( '  %-10s %-26s', $c->{name}, $c->{usage} );
             print "$left $c->{desc}\n";
         }
         print "\n";
     }
 
-    print bold("Environment\n");
+    print bold("create subcommands") . "\n";
+    for my $what ( sort keys %CREATE_SUBS ) {
+        my $e    = $CREATE_SUBS{$what};
+        my $left = sprintf( '  gott create %-8s %-14s', $what, $e->{usage} );
+        print "$left $e->{desc}\n";
+    }
+    print "\n";
+
+    print bold("Environment") . "\n";
     print "  GOT_AUTHOR   \"Name <email>\"  (required for new/snap/stash)\n\n";
 }
 
-# ── local workflow ─────────────────────────────────────────────────────────
+# ── local workflow commands ────────────────────────────────────────────────
 
 sub cmd_new {
     my ( $name, $base_dir ) = @_;
-    die "Usage: gott new <name> [dir]\n" unless $name;
+    err('E001') unless $name;
+    _validate_name( $name, 'repo' );
     author_required();
 
     $base_dir //= $DEFAULT_REPO_DIR;
-    make_path($base_dir) unless -d $base_dir;
+    _make_dir($base_dir) unless -d $base_dir;
 
     my $repo = "$base_dir/$name.git";
     my $tree = "$base_dir/$name";
-    die "Repo already exists: $repo\n" if -e $repo;
-    die "Work tree already exists: $tree\n" if -e $tree;
+    _ensure_new_path( $repo, 'Repo' );
+    _ensure_new_path( $tree, 'Work tree' );
 
-    make_path($tree);
-    print "Creating repo:     $repo\n";
-    run( 'got', 'init', $repo );
+    _make_dir($tree);
+    print dim("repo:") . "  $repo\n";
+    _got_init_repo($repo);
 
-    # seed with README so repo is non-empty
-    my $readme = "$tree/README.md";
-    open( my $fh, '>', $readme ) or die "Cannot write $readme: $!\n";
-    print $fh "# $name\n\nCreated with gott on " . strftime( '%Y-%m-%d', localtime ) . "\n";
-    close $fh;
+    print dim("seed:") . "  importing initial commit...\n";
+    my $readme = _seed_readme( $tree, $name );
+    _in_dir( $tree, sub {
+        _got_import( $repo, 'Initial import' );
+        unlink $readme or warn "Warning: could not remove seed README '$readme': $!\n";
+    } );
 
-    print "Importing seed commit...\n";
-    {
-        my $cwd = getcwd();
-        chdir($tree) or die "Cannot chdir $tree: $!\n";
-        run( 'got', 'import', '-m', 'Initial import', '-r', $repo, '.' );
-        chdir($cwd);
-    }
-    unlink $readme;
-
-    print "Checking out into: $tree\n";
-    run( 'got', 'checkout', $repo, $tree );
-    print "\nDone. Work tree ready at: " . green($tree) . "\n";
-    print "cd $tree\n";
+    print dim("tree:") . "  $tree\n";
+    _got_checkout( $repo, $tree );
+    print "\n" . green("Done.") . " Work tree ready at: " . bold($tree) . "\n";
+    print dim("hint:") . "  cd $tree\n";
 }
 
 sub cmd_clone {
     my ( $url, $dir ) = @_;
-    die "Usage: gott clone <url> [dir]\n" unless $url;
+    err('E002') unless $url;
 
-    $dir //= basename($url);
+    ( my $url_stripped = $url ) =~ s{/+$}{};
+    $dir //= basename($url_stripped);
     $dir =~ s/\.git$//;
+    err('E002') unless $dir ne '';    # URL like 'http://' or '/' yields no usable name
     my $repo = "$dir.git";
 
-    print "Cloning $url -> $repo\n";
-    run( 'got', 'clone', $url, $repo );
-    print "Checking out into $dir\n";
-    run( 'got', 'checkout', $repo, $dir );
-    print "\nDone. cd " . green($dir) . "\n";
+    err( 'E201', 'Directory', $dir )  if -e $dir;
+    err( 'E201', 'Repo path', $repo ) if -e $repo;
+
+    print dim("clone:") . " $url -> $repo\n";
+    _got_clone( $url, $repo );
+    print dim("tree:") . "  $dir\n";
+    _got_checkout( $repo, $dir );
+    print "\n" . green("Done.") . " " . dim("hint:") . " cd " . bold($dir) . "\n";
 }
 
 sub cmd_snap {
@@ -200,57 +578,56 @@ sub cmd_snap {
     worktree_or_die();
     author_required();
     $msg //= 'snap ' . timestamp();
-    print "Staging all files...\n";
-    run( 'got', 'add', '-R', '.' );
-    print "Committing: " . cyan($msg) . "\n";
-    run( 'got', 'commit', '-m', $msg );
+    print dim("stage:") . " all files\n";
+    _got_add_all();
+    print dim("commit:") . " " . cyan($msg) . "\n";
+    _got_commit($msg);
 }
 
 sub cmd_log {
     worktree_or_die();
-    open( my $fh, '-|', 'got', 'log' ) or die "Cannot run got log: $!\n";
-    while (<$fh>) {
+    _got_log_lines( sub {
+        local $_ = $_[0];
         if    (/^commit\s+/)      { print yellow($_) }
         elsif (/^(Author|Date):/) { print cyan($_)   }
         else                      { print $_          }
-    }
-    close $fh;
+    } );
 }
 
 sub cmd_branches {
     worktree_or_die();
-    my @branches = split /\n/, capture('got branch');
+    my @branches = _list_branches();
     my $cur = current_branch();
     for my $b (@branches) {
-        print( $b eq $cur ? green("* $b") . "\n" : "  $b\n" );
+        print( $b eq $cur ? green("* $b") . "\n" : dim("  $b") . "\n" );
     }
 }
 
 sub cmd_switch {
     my ($branch) = @_;
-    die "Usage: gott switch <branch>\n" unless $branch;
+    err('E003') unless $branch;
     worktree_or_die();
-    run( 'got', 'update', '-b', $branch );
+    _validate_branch_name($branch);
+    err( 'E401', $branch, $branch ) unless _branch_exists($branch);
+    _got_switch($branch);
 }
 
 sub cmd_nb {
     my ($branch) = @_;
-    die "Usage: gott nb <branch>\n" unless $branch;
-    worktree_or_die();
-    run( 'got', 'branch', '-c', $branch );
-    run( 'got', 'update', '-b', $branch );
-    print "Switched to new branch " . green($branch) . "\n";
+    err('E004') unless $branch;
+    _create_branch($branch);    # same logic as: gott create branch <name>
 }
 
 sub cmd_undo {
     my ($file) = @_;
     worktree_or_die();
     if ($file) {
-        print "Reverting $file\n";
-        run( 'got', 'revert', $file );
+        err( 'E202', $file ) unless -e $file;
+        print dim("revert:") . " $file\n";
+        _got_revert_file($file);
     } else {
-        print "Reverting all changes\n";
-        run( 'got', 'revert', '.' );
+        print dim("revert:") . " all changes\n";
+        _got_revert_all();
     }
 }
 
@@ -261,52 +638,62 @@ sub cmd_info {
     run( 'got', 'status' );
 }
 
-# ── git interop ────────────────────────────────────────────────────────────
+# ── create subcommand handlers ─────────────────────────────────────────────
 
-sub _remote_file { repo_path() . '/gott-remote' }
-
-sub _write_file {
-    my ( $path, $content ) = @_;
-    open( my $fh, '>', $path ) or die "Cannot write $path: $!\n";
-    print $fh "$content\n";
-    close $fh;
+sub _create_file {
+    my ($name) = @_;
+    _validate_name( $name, 'file' );
+    worktree_or_die();
+    _ensure_new_path( $name, 'File' );
+    _touch_file($name);
+    print green("Created") . " file " . bold($name) . "\n";
+    print dim("hint:") . "  got add $name\n";
 }
 
-sub _read_file {
-    my ($path) = @_;
-    open( my $fh, '<', $path ) or die "Cannot read $path: $!\n";
-    my $line = <$fh>;
-    chomp $line;
-    return $line;
+sub _create_dir {
+    my ($name) = @_;
+    _validate_name( $name, 'dir' );
+    worktree_or_die();
+    _ensure_new_path( $name, 'Path' );
+    _make_dir($name);
+    print green("Created") . " directory " . bold($name) . "\n";
+    print dim("hint:") . "  got add -R $name\n";
 }
 
-sub _read_remote {
-    my $file = _remote_file();
-    die "No git remote set. Run: gott git-remote <url>\n" unless -f $file;
-    return _read_file($file);
+sub _create_branch {
+    my ($name) = @_;
+    err('E005') unless $name;
+    _validate_branch_name($name);
+    worktree_or_die();
+    err( 'E402', $name, $name ) if _branch_exists($name);
+    _got_new_branch($name);
+    _got_switch($name);
+    print green("Switched") . " to new branch " . bold($name) . "\n";
 }
 
-sub _do_rebase {
-    my ($base) = @_;
-    my $rc = system( 'got', 'rebase', $base );
-    if ( $rc != 0 ) {
-        print red("Rebase has conflicts.") . " Resolve, then:\n";
-        print "  got rebase -c   # continue\n";
-        print "  got rebase -a   # abort\n";
-        exit 1;
+sub cmd_create {
+    my ( $what, @rest ) = @_;
+    unless ( $what && exists $CREATE_SUBS{$what} ) {
+        my $valid = join( ' | ', sort keys %CREATE_SUBS );
+        err( 'E006', $valid );
     }
+    $CREATE_SUBS{$what}{sub}->(@rest);
 }
+
+# ── git interop commands ───────────────────────────────────────────────────
 
 sub cmd_git_remote {
     my ($url) = @_;
     worktree_or_die();
     my $file = _remote_file();
     if ($url) {
+        err( 'E014', $url )
+            unless $url =~ m{^(https?|git|ssh)://|^[\w.\-]+\@[\w.\-]+:};
         _write_file( $file, $url );
-        print "Remote set to: " . cyan($url) . "\n";
+        print dim("remote:") . " " . cyan($url) . "\n";
     } else {
         if ( -f $file ) {
-            print "Remote: " . cyan( _read_file($file) ) . "\n";
+            print dim("remote:") . " " . cyan( _read_file($file) ) . "\n";
         } else {
             print "No remote set. Use: gott git-remote <url>\n";
         }
@@ -316,37 +703,29 @@ sub cmd_git_remote {
 sub cmd_git_pull {
     worktree_or_die();
     git_required();
-    my $url  = _read_remote();
-    my $repo = repo_path();
-    print "Fetching from " . cyan($url) . " ...\n";
-    # got fetch works over git:// https:// and ssh://
-    run( 'got', 'fetch', '-r', $url, '-R', $repo );
-    print green("Fetch complete.") . " Run 'gott rebase' or 'gott sync' to rebase.\n";
+    _fetch_remote();
+    print green("Fetch complete.") . " " . dim("hint:") . " gott rebase  or  gott sync\n";
 }
 
 sub cmd_git_push {
     my ($branch) = @_;
     worktree_or_die();
     git_required();
-    my $url = _read_remote();
     $branch //= current_branch();
-    print "Pushing " . cyan($branch) . " to " . cyan($url) . "\n";
-    run( 'got', 'send', '-b', $branch, '-r', $url );
+    _validate_branch_name($branch);
+    my $url = _read_remote();
+    print dim("push:") . "  " . bold($branch) . " -> " . cyan($url) . "\n";
+    _got_send( $branch, $url );
     print green("Push complete.") . "\n";
 }
 
 sub cmd_sync {
     worktree_or_die();
     git_required();
-    my $url    = _read_remote();
-    my $repo   = repo_path();
     my $branch = current_branch();
-
-    print "Fetching from " . cyan($url) . " ...\n";
-    run( 'got', 'fetch', '-r', $url, '-R', $repo );
-
-    print "Rebasing " . cyan($branch) . " on origin/main ...\n";
-    _do_rebase('refs/remotes/origin/main');
+    _fetch_remote();
+    print dim("rebase:") . " " . bold($branch) . " onto origin/main\n";
+    _got_rebase('refs/remotes/origin/main');
     print green("Sync complete.") . "\n";
 }
 
@@ -355,118 +734,137 @@ sub cmd_rebase {
     worktree_or_die();
     $new_base //= 'refs/remotes/origin/main';
     my $branch = current_branch();
-    print "Rebasing " . cyan($branch) . " onto " . cyan($new_base) . " ...\n";
-    _do_rebase($new_base);
+    print dim("rebase:") . " " . bold($branch) . " onto " . cyan($new_base) . "\n";
+    _got_rebase($new_base);
     print green("Rebase complete.") . "\n";
 }
 
 sub cmd_patch {
     my ($n) = @_;
     $n //= 1;
-    $n =~ /^\d+$/ or die "Usage: gott patch [n]\n";
+    err('E008') unless $n =~ /^[0-9]+$/;
+    err('E009') if $n < 1;
     worktree_or_die();
 
-    my @hashes;
-    open( my $fh, '-|', 'got', 'log' ) or die "Cannot run got log: $!\n";
-    while (<$fh>) {
-        push @hashes, $1 if /^commit\s+([0-9a-f]+)/;
-    }
-    close $fh;
-
+    my @hashes = _got_log_hashes();
+    err('E203') unless @hashes;
     $n = @hashes if $n > @hashes;
 
     for my $i ( 1 .. $n ) {
         my $hash = $hashes[ $i - 1 ];
         my $file = sprintf( '%04d-%s.patch', $i, substr( $hash, 0, 8 ) );
-        print "Writing $file\n";
-        open( my $out, '>', $file ) or die "Cannot write $file: $!\n";
-        open( my $diff, '-|', 'got', 'diff', '-c', $hash )
-            or die "Cannot run got diff: $!\n";
-        print $out $_ while <$diff>;
-        close $diff;
-        close $out;
+        print dim("write:") . " $file\n";
+        open( my $out, '>', $file ) or err( 'E204', $file, $! );
+        my $ok = eval {
+            _got_diff_commit( $hash, sub {
+                ( print $out $_[0] ) or die "write $file: $!\n";
+            } );
+            1;
+        };
+        my $write_err = $ok ? ( close($out) ? '' : "close $file: $!\n" ) : do { close $out; $@ || "got diff failed for $hash\n" };
+        if ( $write_err ) { unlink $file; die $write_err }
     }
-    print green("Done.") . " Send .patch files; teammates apply with: git am *.patch\n";
+    print green("Done.") . " " . dim("hint:") . " teammates apply with: git am *.patch\n";
 }
 
 sub cmd_apply {
     my ($file) = @_;
-    die "Usage: gott apply <file.patch>\n" unless $file && -f $file;
+    err('E007')           unless $file;
+    err( 'E202', $file ) unless -f $file;
+    err( 'E015', $file ) unless $file =~ /\.patch$/i;
+    patch_required();
     worktree_or_die();
-    print "Applying $file ...\n";
+    print dim("apply:") . " $file\n";
     run( 'patch', '-p1', '--input', $file );
-    print green("Patch applied.") . " Review, then: gott snap \"apply patch\"\n";
+    print green("Patch applied.") . " " . dim("hint:") . " gott snap \"apply patch\"\n";
 }
 
 sub cmd_stash {
     worktree_or_die();
     author_required();
 
-    my $status = capture('got status');
-    if ( !$status ) { print "Nothing to stash.\n"; return; }
+    # capture() returns '' on both "no changes" and command failure.
+    # Use open+close to check the exit code after reading stdout.
+    open( my $st_fh, '-|', 'got', 'status' ) or err( 'E211', $! );
+    my $status = do { local $/; <$st_fh> };
+    close $st_fh;
+    err( 'E213', $? >> 8 ) if $? != 0;
+    if ( !$status || $status !~ /\S/ ) { print "Nothing to stash.\n"; return; }
 
     my $branch = current_branch();
     my $stash  = '_stash_' . timestamp();
+    err( 'E215', $stash ) if _branch_exists($stash);
 
-    print "Stashing to branch " . cyan($stash) . " ...\n";
-    run( 'got', 'branch', '-c', $stash );
-    run( 'got', 'update', '-b', $stash );
-    run( 'got', 'add',    '-R', '.' );
-    run( 'got', 'commit', '-m', "stash: $stash" );
-    run( 'got', 'update', '-b', $branch );
-    run( 'got', 'revert', '.' );
+    print dim("stash:") . " saving to branch " . cyan($stash) . "\n";
+    _got_new_branch($stash);
+    # If anything fails after switching to the stash branch, switch back and
+    # delete the partial stash branch so the repo is left in a clean state.
+    my $stash_err = do {
+        local $@;
+        eval {
+            _got_switch($stash);
+            _got_add_all();
+            _got_commit("stash: $stash");
+            _got_switch($branch);
+        };
+        $@;
+    };
+    if ( $stash_err ) {
+        # Best-effort cleanup: return to original branch and remove partial stash.
+        eval { _got_switch($branch) };
+        eval { _got_delete_branch($stash) };
+        die $stash_err;
+    }
+    _got_revert_all();
 
     _write_file( repo_path() . '/gott-stash', $stash );
-
-    print green("Stashed.") . " Restore with: gott unstash\n";
+    print green("Stashed.") . " " . dim("hint:") . " gott unstash\n";
 }
 
 sub cmd_unstash {
     worktree_or_die();
     my $sf = repo_path() . '/gott-stash';
-    die "No stash found. Run 'gott stash' first.\n" unless -f $sf;
+    err('E303') unless -f $sf;
 
     my $stash = _read_file($sf);
+    err('E307') unless $stash ne '';
+    err( 'E304', $stash ) unless _branch_exists($stash);
 
-    print "Restoring stash from branch " . cyan($stash) . " ...\n";
+    print dim("unstash:") . " restoring from branch " . cyan($stash) . "\n";
 
-    # find the stash commit hash
-    my $hash = '';
-    open( my $log, '-|', 'got', 'log', '-b', $stash )
-        or die "Cannot run got log: $!\n";
-    while (<$log>) {
-        if (/^commit\s+([0-9a-f]+)/) { $hash = $1; last; }
-    }
-    close $log;
-    die "Cannot find stash commit on branch $stash\n" unless $hash;
+    my ($hash) = _got_log_hashes($stash);
+    err( 'E305', $stash ) unless $hash;
 
-    run( 'got', 'cherrypick', $hash );
-    run( 'got', 'unstage',    '.' );
-    run( 'got', 'branch',     '-d', $stash );
-    unlink $sf;
+    _got_cherrypick($hash);
+    _got_unstage_all();
+    _got_delete_branch($stash);
+    unlink $sf or warn "Warning: could not remove stash file $sf: $!\n";
 
-    print green("Unstashed.") . " Changes are unstaged — review then: gott snap \"...\"\n";
+    print green("Unstashed.") . " Changes are unstaged. " . dim("hint:") . " gott snap \"...\"\n";
 }
 
 # ── dispatch ───────────────────────────────────────────────────────────────
 
-got_required();
-
 my $cmd = shift @ARGV // 'help';
 
-my %dispatch = (
-    ( map { $_->{name} => $_->{code} } @COMMANDS ),
-    help     => \&cmd_help,
-    '--help' => \&cmd_help,
-    '-h'     => \&cmd_help,
-);
-
-my $handler = $dispatch{$cmd}
+my $handler = $DISPATCH{$cmd}
     or do { print STDERR red("Unknown command: $cmd") . "\n\n"; cmd_help(); exit 1; };
+
+# help works without got installed — all other commands need it
+got_required() unless $HELP_CMDS{$cmd};
 
 eval { $handler->(@ARGV) };
 if ($@) {
-    chomp( my $err = $@ );
-    print STDERR red("Error:") . " $err\n";
+    chomp( my $raw = $@ );
+    # Structured errors from err(): "EXXX: <msg>\0<hint>"
+    if ( $raw =~ /^(E\d{3}): ([^\0]*)\0(.*)$/ ) {
+        my ( $code, $msg, $hint ) = ( $1, $2, $3 );
+        print STDERR red($code) . ": $msg\n";
+        print STDERR dim("hint:") . " $hint\n" if $hint;
+    } elsif ( $raw ne '' ) {
+        # Plain die (system errors, got errors already printed)
+        print STDERR red("Error:") . " $raw\n";
+    }
+    # $raw eq '' means the sub already printed its own message (e.g. rebase conflict)
     exit 1;
 }
